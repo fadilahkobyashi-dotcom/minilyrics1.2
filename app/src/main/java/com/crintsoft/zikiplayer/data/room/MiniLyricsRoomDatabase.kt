@@ -27,7 +27,7 @@ import com.crintsoft.zikiplayer.data.room.entities.SongEntity
         ArtworkEntity::class,
         ExcludedSongEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class MiniLyricsRoomDatabase : RoomDatabase() {
@@ -62,6 +62,12 @@ abstract class MiniLyricsRoomDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `songs` ADD COLUMN `isEdited` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         @Volatile
         private var INSTANCE: MiniLyricsRoomDatabase? = null
 
@@ -72,7 +78,7 @@ abstract class MiniLyricsRoomDatabase : RoomDatabase() {
                     MiniLyricsRoomDatabase::class.java,
                     DATABASE_NAME
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .fallbackToDestructiveMigration(true)
                     .build()
                 INSTANCE = instance

@@ -18,7 +18,8 @@ data class Track(
     val rawResId: Int? = null,
     val lrcContent: String? = null,
     val txtContent: String? = null,
-    val isDemo: Boolean = false
+    val isDemo: Boolean = false,
+    val isEdited: Boolean = false
 ) {
     val hasLrc: Boolean get() = !lrcContent.isNullOrBlank()
     val hasTxt: Boolean get() = !txtContent.isNullOrBlank()

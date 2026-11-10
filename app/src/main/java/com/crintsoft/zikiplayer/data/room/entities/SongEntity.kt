@@ -30,6 +30,7 @@ data class SongEntity(
     val artworkUri: String? = null, // Local persistent file path or content URI
     val rawResId: Int? = null,
     val isDemo: Boolean = false,
+    val isEdited: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 ) {
@@ -52,7 +53,8 @@ data class SongEntity(
             rawResId = rawResId,
             lrcContent = lrcContent,
             txtContent = txtContent,
-            isDemo = isDemo
+            isDemo = isDemo,
+            isEdited = isEdited
         )
     }
 
@@ -74,7 +76,8 @@ data class SongEntity(
                 audioUri = track.audioUri,
                 artworkUri = track.artworkUri,
                 rawResId = track.rawResId,
-                isDemo = track.isDemo
+                isDemo = track.isDemo,
+                isEdited = track.isEdited
             )
         }
     }

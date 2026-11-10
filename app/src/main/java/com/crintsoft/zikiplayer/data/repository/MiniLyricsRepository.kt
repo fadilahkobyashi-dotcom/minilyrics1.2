@@ -44,7 +44,73 @@ class MiniLyricsRepository(private val database: MiniLyricsRoomDatabase) {
     }
 
     suspend fun updateSongMetadata(song: SongEntity) {
-        songDao.updateSong(song)
+        val editedSong = song.copy(isEdited = true, updatedAt = System.currentTimeMillis())
+        val rows = songDao.updateSong(editedSong)
+        if (rows == 0) {
+            songDao.insertSong(editedSong)
+        }
+    }
+
+    /**
+     * Merges newly discovered audio files from MediaStore with persistent Room library.
+     * Strictly enforces metadata priority:
+     * 1. If song was manually edited (isEdited == true), keep ALL saved metadata!
+     * 2. If song already has custom saved artwork, preserve the artwork!
+     * 3. Truly new songs are inserted with isEdited = false.
+     * 4. A library refresh or rescan will NEVER overwrite manually edited info.
+     */
+    suspend fun mergeScannedSongs(scannedSongs: List<SongEntity>) {
+        if (scannedSongs.isEmpty()) return
+
+        val existingList = songDao.getAllSongsList()
+        val existingById = existingList.associateBy { it.id }
+        val existingByUri = existingList.filter { !it.audioUri.isNullOrBlank() }.associateBy { it.audioUri!! }
+        val existingByKey = existingList.associateBy { normalizeKey(it.artist, it.title) }
+
+        val toInsert = mutableListOf<SongEntity>()
+        val toUpdate = mutableListOf<SongEntity>()
+
+        for (scanned in scannedSongs) {
+            val key = normalizeKey(scanned.artist, scanned.title)
+            val existing = existingById[scanned.id]
+                ?: scanned.audioUri?.let { existingByUri[it] }
+                ?: existingByKey[key]
+
+            if (existing == null) {
+                toInsert.add(scanned.copy(isEdited = false))
+            } else {
+                if (existing.isEdited) {
+                    // CRITICAL: Manually edited metadata MUST NOT be overwritten by raw audio tags!
+                    // Only update audioUri if changed/missing, and keep all edited fields intact.
+                    var updated = existing
+                    if (existing.audioUri.isNullOrBlank() && !scanned.audioUri.isNullOrBlank()) {
+                        updated = updated.copy(audioUri = scanned.audioUri)
+                    }
+                    if (existing.durationMs <= 0L && scanned.durationMs > 0L) {
+                        updated = updated.copy(durationMs = scanned.durationMs)
+                    }
+                    if (updated != existing) {
+                        toUpdate.add(updated)
+                    }
+                } else {
+                    // Unedited track: update metadata from MediaStore while preserving any custom saved artwork
+                    val merged = scanned.copy(
+                        id = existing.id,
+                        artworkUri = existing.artworkUri ?: scanned.artworkUri,
+                        createdAt = existing.createdAt,
+                        isEdited = false
+                    )
+                    toUpdate.add(merged)
+                }
+            }
+        }
+
+        if (toInsert.isNotEmpty()) {
+            songDao.insertSongs(toInsert)
+        }
+        for (item in toUpdate) {
+            songDao.updateSong(item)
+        }
     }
 
     suspend fun updateSongArtwork(songId: String, artworkUri: String?) {

@@ -38,8 +38,17 @@ interface SongDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSongs(songs: List<SongEntity>)
 
+    @Query("SELECT * FROM songs WHERE isEdited = 1")
+    suspend fun getEditedSongs(): List<SongEntity>
+
+    @Query("SELECT * FROM songs WHERE audioUri = :audioUri LIMIT 1")
+    suspend fun getSongByAudioUri(audioUri: String): SongEntity?
+
+    @Query("UPDATE songs SET isEdited = 1, updatedAt = :updatedAt WHERE id = :songId")
+    suspend fun markAsEdited(songId: String, updatedAt: Long = System.currentTimeMillis()): Int
+
     @Update
-    suspend fun updateSong(song: SongEntity)
+    suspend fun updateSong(song: SongEntity): Int
 
     @Query("UPDATE songs SET artworkUri = :artworkUri, updatedAt = :updatedAt WHERE id = :songId")
     suspend fun updateSongArtwork(songId: String, artworkUri: String?, updatedAt: Long = System.currentTimeMillis()): Int
