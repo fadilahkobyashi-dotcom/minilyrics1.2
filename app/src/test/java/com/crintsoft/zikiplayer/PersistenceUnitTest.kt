@@ -227,5 +227,107 @@ class PersistenceUnitTest {
         assertEquals("2025", entity.releaseYear)
         assertEquals("/files/art.jpg", entity.artworkUri)
     }
+
+    @Test
+    fun testExcludedSongMatchingLogic() {
+        fun normalizeKey(artist: String, title: String): String {
+            val cleanArtist = artist.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
+            val cleanTitle = title.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
+            return "${cleanArtist}:::${cleanTitle}"
+        }
+
+        val excluded = com.crintsoft.zikiplayer.data.room.entities.ExcludedSongEntity(
+            id = "ms_999",
+            audioUri = "content://media/external/audio/media/999",
+            stableKey = normalizeKey("Solaris", "Echoes of Time"),
+            title = "Echoes of Time",
+            artist = "Solaris",
+            reason = "USER_REMOVED"
+        )
+
+        val excludedIds = setOf(excluded.id)
+        val excludedUris = setOfNotNull(excluded.audioUri)
+        val excludedKeys = setOf(excluded.stableKey)
+
+        // Same ID matches
+        assertTrue(excludedIds.contains("ms_999"))
+
+        // Same URI matches
+        assertTrue(excludedUris.contains("content://media/external/audio/media/999"))
+
+        // Same artist & title with different casing/whitespace matches stableKey
+        val candidateKey = normalizeKey("  solaris ", "Echoes of Time!")
+        assertTrue(excludedKeys.contains(candidateKey))
+
+        // Different song does NOT match
+        val otherKey = normalizeKey("Solaris", "Different Song")
+        assertFalse(excludedKeys.contains(otherKey))
+        assertFalse(excludedIds.contains("ms_1000"))
+        assertFalse(excludedUris.contains("content://media/external/audio/media/1000"))
+    }
+
+    @Test
+    fun testMusicScannerExclusionSkipping() {
+        fun normalizeKey(artist: String, title: String): String {
+            val cleanArtist = artist.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
+            val cleanTitle = title.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
+            return "${cleanArtist}:::${cleanTitle}"
+        }
+
+        // Simulate 4 songs found during device MediaStore scan:
+        // Song 1: Normal new song
+        // Song 2: Intentionally removed by user from MiniLyrics (Option A)
+        // Song 3: Permanently deleted (Option B)
+        // Song 4: Existing active song
+        val removedSongUri = "content://media/external/audio/media/200"
+        val deletedSongUri = "content://media/external/audio/media/300"
+
+        val excludedList = listOf(
+            com.crintsoft.zikiplayer.data.room.entities.ExcludedSongEntity(
+                id = "ms_200",
+                audioUri = removedSongUri,
+                stableKey = normalizeKey("Artist B", "Removed Song"),
+                title = "Removed Song",
+                artist = "Artist B",
+                reason = "USER_REMOVED"
+            ),
+            com.crintsoft.zikiplayer.data.room.entities.ExcludedSongEntity(
+                id = "ms_300",
+                audioUri = deletedSongUri,
+                stableKey = normalizeKey("Artist C", "Deleted Song"),
+                title = "Deleted Song",
+                artist = "Artist C",
+                reason = "PERMANENTLY_DELETED"
+            )
+        )
+
+        val excludedIds = excludedList.map { it.id }.toSet()
+        val excludedUris = excludedList.mapNotNull { it.audioUri }.toSet()
+        val excludedKeys = excludedList.map { it.stableKey }.toSet()
+
+        data class DiscoveredFile(val id: String, val title: String, val artist: String, val uri: String)
+        val discoveredFiles = listOf(
+            DiscoveredFile("ms_100", "New Song 1", "Artist A", "content://media/external/audio/media/100"),
+            DiscoveredFile("ms_200", "Removed Song", "Artist B", removedSongUri),
+            DiscoveredFile("ms_300", "Deleted Song", "Artist C", deletedSongUri),
+            DiscoveredFile("ms_400", "Active Song", "Artist D", "content://media/external/audio/media/400")
+        )
+
+        val filteredToInsert = discoveredFiles.filter { file ->
+            val stableKey = normalizeKey(file.artist, file.title)
+            val isExcluded = excludedIds.contains(file.id) ||
+                    excludedUris.contains(file.uri) ||
+                    excludedKeys.contains(stableKey)
+            !isExcluded
+        }
+
+        // Only Song 1 and Song 4 must be inserted; removed and deleted songs must be strictly filtered out
+        assertEquals(2, filteredToInsert.size)
+        assertEquals("ms_100", filteredToInsert[0].id)
+        assertEquals("ms_400", filteredToInsert[1].id)
+        assertFalse(filteredToInsert.any { it.id == "ms_200" })
+        assertFalse(filteredToInsert.any { it.id == "ms_300" })
+    }
 }
+
 

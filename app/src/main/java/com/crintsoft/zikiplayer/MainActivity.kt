@@ -64,6 +64,27 @@ class MainActivity : ComponentActivity() {
                     uri?.let { handlePickedAudio(it) }
                 }
 
+                // Scoped Storage physical deletion launcher
+                val deleteIntentSenderLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.StartIntentSenderForResult()
+                ) { result ->
+                    if (result.resultCode == RESULT_OK) {
+                        viewModel.onPermanentDeleteConsentGranted()
+                    } else {
+                        viewModel.onPermanentDeleteConsentDenied()
+                    }
+                }
+
+                val deleteIntentSender by viewModel.deleteIntentSenderRequest.collectAsState()
+                LaunchedEffect(deleteIntentSender) {
+                    deleteIntentSender?.let { sender ->
+                        deleteIntentSenderLauncher.launch(
+                            androidx.activity.result.IntentSenderRequest.Builder(sender).build()
+                        )
+                        viewModel.clearDeleteIntentSenderRequest()
+                    }
+                }
+
                 // Audio permission launcher for Android 13-16+
                 val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestPermission()

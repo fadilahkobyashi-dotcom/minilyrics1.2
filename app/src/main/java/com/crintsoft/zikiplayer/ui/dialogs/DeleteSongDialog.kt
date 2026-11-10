@@ -38,32 +38,52 @@ fun DeleteSongDialog(
 ) {
     var deletePhysicalFile by remember { mutableStateOf(false) }
 
+    val dialogTitle = if (deletePhysicalFile) {
+        "Permanently Delete Audio File?"
+    } else {
+        "Remove from MiniLyrics?"
+    }
+
+    val actionDescription = if (deletePhysicalFile) {
+        "The actual audio file will be permanently deleted from internal storage. This action cannot be undone."
+    } else {
+        "The song will be removed from the MiniLyrics library but its audio file will remain in internal storage."
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = {
             Icon(
                 imageVector = Icons.Default.Warning,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.error
+                tint = if (deletePhysicalFile) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
             )
         },
         title = {
             Text(
-                text = "Delete \"${track.title}\"?",
+                text = dialogTitle,
                 style = MaterialTheme.typography.titleLarge
             )
         },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    text = "Choose deletion option for this track:",
+                    text = actionDescription,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurface
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Option A: Remove from library only
+                Text(
+                    text = "Select deletion option:",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Option A: Remove from MiniLyrics (keep audio file)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -79,12 +99,12 @@ fun DeleteSongDialog(
                     Spacer(modifier = Modifier.width(8.dp))
                     Column {
                         Text(
-                            text = "Remove from MiniLyrics Library",
+                            text = "Remove from MiniLyrics",
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "Removes the song and lyrics associations from MiniLyrics. The audio file remains safe on your device.",
+                            text = "Removes the song and its records from MiniLyrics. Audio file remains in internal storage.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -93,7 +113,7 @@ fun DeleteSongDialog(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Option B: Delete audio file
+                // Option B: Permanently Delete from Internal Storage
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -110,15 +130,15 @@ fun DeleteSongDialog(
                     Spacer(modifier = Modifier.width(8.dp))
                     Column {
                         Text(
-                            text = if (track.isDemo) "Delete Audio File (Disabled for demo track)" else "Permanently Delete Audio File",
+                            text = if (track.isDemo) "Permanently Delete from Storage (Demo track)" else "Permanently Delete from Internal Storage",
                             style = MaterialTheme.typography.bodyLarge,
                             color = if (track.isDemo) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f) else MaterialTheme.colorScheme.error
                         )
                         Text(
                             text = if (track.isDemo) {
-                                "Built-in demo tracks are bundled with the app and cannot be deleted from the filesystem."
+                                "Demo tracks are built into the app and cannot be deleted from disk. Use \"Remove from MiniLyrics\" instead."
                             } else {
-                                "WARNING: Permanently removes the audio file from your device storage. This cannot be undone."
+                                "Deletes the physical audio file from your device. Cannot be recovered."
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -131,13 +151,13 @@ fun DeleteSongDialog(
             Button(
                 onClick = { onConfirmDelete(deletePhysicalFile) },
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.error
+                    containerColor = if (deletePhysicalFile) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                 ),
                 modifier = Modifier.testTag("confirm_delete_button")
             ) {
                 Icon(Icons.Default.DeleteForever, contentDescription = null)
                 Spacer(modifier = Modifier.width(6.dp))
-                Text(if (deletePhysicalFile) "Delete Permanently" else "Remove")
+                Text(if (deletePhysicalFile) "Permanently Delete" else "Remove from MiniLyrics")
             }
         },
         dismissButton = {

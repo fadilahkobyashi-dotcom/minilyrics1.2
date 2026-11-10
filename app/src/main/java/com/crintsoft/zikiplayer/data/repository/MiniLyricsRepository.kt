@@ -2,6 +2,7 @@ package com.crintsoft.zikiplayer.data.repository
 
 import com.crintsoft.zikiplayer.data.room.MiniLyricsRoomDatabase
 import com.crintsoft.zikiplayer.data.room.entities.ArtworkEntity
+import com.crintsoft.zikiplayer.data.room.entities.ExcludedSongEntity
 import com.crintsoft.zikiplayer.data.room.entities.LyricsEntity
 import com.crintsoft.zikiplayer.data.room.entities.PlaylistEntity
 import com.crintsoft.zikiplayer.data.room.entities.PlaylistSongEntity
@@ -16,6 +17,13 @@ class MiniLyricsRepository(private val database: MiniLyricsRoomDatabase) {
     private val playlistDao = database.playlistDao()
     private val lyricsDao = database.lyricsDao()
     private val artworkDao = database.artworkDao()
+    private val excludedSongDao = database.excludedSongDao()
+
+    fun normalizeKey(artist: String, title: String): String {
+        val cleanArtist = artist.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
+        val cleanTitle = title.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
+        return "${cleanArtist}:::${cleanTitle}"
+    }
 
     // =========================================================================
     // SONGS
@@ -43,7 +51,25 @@ class MiniLyricsRepository(private val database: MiniLyricsRoomDatabase) {
         songDao.updateSongArtwork(songId, artworkUri)
     }
 
-    suspend fun deleteSong(songId: String) {
+    suspend fun deleteSong(
+        songId: String,
+        audioUri: String? = null,
+        title: String? = null,
+        artist: String? = null,
+        reason: String = "USER_REMOVED"
+    ) {
+        // 1. Record persistent exclusion so scanner and seed logic never re-add this song
+        if (!title.isNullOrBlank() && !artist.isNullOrBlank()) {
+            excludeSong(songId, audioUri, title, artist, reason)
+        } else {
+            // If title and artist were not supplied, attempt to look up from database before deleting
+            val existing = songDao.getSongById(songId)
+            if (existing != null) {
+                excludeSong(songId, existing.audioUri, existing.title, existing.artist, reason)
+            }
+        }
+
+        // 2. Remove from active library tables
         songDao.deleteSongById(songId)
         playlistDao.deletePlaylistSongsForSong(songId)
         lyricsDao.deleteLyricsBySongId(songId)
@@ -51,11 +77,62 @@ class MiniLyricsRepository(private val database: MiniLyricsRoomDatabase) {
     }
 
     suspend fun ensureInitialTracks(defaultTracks: List<Track>) {
+        val excluded = excludedSongDao.getAllExcludedSongs()
+        val excludedIds = excluded.map { it.id }.toSet()
+        val excludedKeys = excluded.map { it.stableKey }.toSet()
+
         val currentCount = songDao.count()
         if (currentCount == 0) {
-            val entities = defaultTracks.map { SongEntity.fromTrack(it) }
-            songDao.insertSongs(entities)
+            // Filter out any default tracks that were intentionally removed/excluded by user
+            val allowed = defaultTracks.filter { track ->
+                !excludedIds.contains(track.id) &&
+                        !excludedKeys.contains(normalizeKey(track.artist, track.title))
+            }
+            if (allowed.isNotEmpty()) {
+                val entities = allowed.map { SongEntity.fromTrack(it) }
+                songDao.insertSongs(entities)
+            }
         }
+    }
+
+    // =========================================================================
+    // EXCLUSION MECHANISM (PREVENTS ACCIDENTAL RESTORATION ON RESCAN / REBOOT)
+    // =========================================================================
+
+    suspend fun excludeSong(
+        songId: String,
+        audioUri: String?,
+        title: String,
+        artist: String,
+        reason: String = "USER_REMOVED"
+    ) {
+        val stableKey = normalizeKey(artist, title)
+        excludedSongDao.insertExcludedSong(
+            ExcludedSongEntity(
+                id = songId,
+                audioUri = audioUri,
+                stableKey = stableKey,
+                title = title,
+                artist = artist,
+                reason = reason,
+                excludedAt = System.currentTimeMillis()
+            )
+        )
+    }
+
+    suspend fun isSongExcluded(songId: String, title: String, artist: String, audioUri: String?): Boolean {
+        val stableKey = normalizeKey(artist, title)
+        return excludedSongDao.isExcluded(id = songId, stableKey = stableKey, audioUri = audioUri)
+    }
+
+    suspend fun getAllExcludedSongs(): List<ExcludedSongEntity> {
+        return excludedSongDao.getAllExcludedSongs()
+    }
+
+    suspend fun removeSongFromExclusion(songId: String, artist: String, title: String) {
+        excludedSongDao.removeExcludedSong(songId)
+        val stableKey = normalizeKey(artist, title)
+        excludedSongDao.removeExcludedByStableKey(stableKey)
     }
 
     // =========================================================================
@@ -124,9 +201,7 @@ class MiniLyricsRepository(private val database: MiniLyricsRoomDatabase) {
     }
 
     suspend fun findLyrics(songId: String, title: String, artist: String, musicFileRef: String = ""): LyricsEntity? {
-        val cleanArtist = artist.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
-        val cleanTitle = title.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
-        val stableKey = "${cleanArtist}:::${cleanTitle}"
+        val stableKey = normalizeKey(artist, title)
         return lyricsDao.findLyrics(songId = songId, stableKey = stableKey, musicFileRef = musicFileRef)
     }
 

@@ -2,6 +2,7 @@ package com.crintsoft.zikiplayer.ui
 
 import android.app.Application
 import android.content.ContentUris
+import android.content.IntentSender
 import android.net.Uri
 import android.provider.MediaStore
 import android.util.Log
@@ -22,7 +23,9 @@ import com.crintsoft.zikiplayer.lyrics.LyricsSearchResult
 import com.crintsoft.zikiplayer.lyrics.LyricsSearchService
 import com.crintsoft.zikiplayer.lyrics.LyricsStorageManager
 import com.crintsoft.zikiplayer.lyrics.StorageDirectoryStatus
+import com.crintsoft.zikiplayer.media.AudioFileDeletionHelper
 import com.crintsoft.zikiplayer.media.ArtworkStorageManager
+import com.crintsoft.zikiplayer.media.DeletionResult
 import com.crintsoft.zikiplayer.model.LyricType
 import com.crintsoft.zikiplayer.model.Playlist
 import com.crintsoft.zikiplayer.model.Track
@@ -32,7 +35,6 @@ import com.crintsoft.zikiplayer.ui.theme.HighlightGold
 import com.crintsoft.zikiplayer.ui.theme.LowlightGray
 import com.crintsoft.zikiplayer.ui.theme.LyricsDisplayPreferences
 import java.io.BufferedReader
-import java.io.File
 import java.io.InputStreamReader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -64,6 +66,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val roomDatabase = MiniLyricsRoomDatabase.getInstance(application)
     val repository = MiniLyricsRepository(roomDatabase)
     val artworkStorageManager = ArtworkStorageManager(application)
+    val audioDeletionHelper = AudioFileDeletionHelper(application)
 
     // Legacy helper kept for backward compatibility and app settings
     val dbHelper = MiniLyricsDbHelper(application)
@@ -115,6 +118,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _deletingTrack = MutableStateFlow<Track?>(null)
     val deletingTrack: StateFlow<Track?> = _deletingTrack.asStateFlow()
 
+    // Scoped storage deletion authorization state
+    private val _deleteIntentSenderRequest = MutableStateFlow<IntentSender?>(null)
+    val deleteIntentSenderRequest: StateFlow<IntentSender?> = _deleteIntentSenderRequest.asStateFlow()
+    private var pendingDeletedTrack: Track? = null
+
     init {
         // Wire lyricsResolver to check permanent disk storage & DB association
         playbackManager.lyricsResolver = { track ->
@@ -130,7 +138,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Initialize Room data flow and initial tracks
         initializeDatabaseAndObservations()
 
-        // Scan device audio
+        // Scan device audio with exclusion filtering
         scanDeviceAudio()
     }
 
@@ -139,7 +147,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // 1. Migrate legacy SQLite if needed
             RoomMigrationHelper.migrateFromSqliteIfNeeded(getApplication(), roomDatabase)
 
-            // 2. Ensure default demo tracks exist in Room
+            // 2. Ensure default demo tracks exist in Room (respecting any user deletions)
             val defaultTracks = DefaultLyrics.getDefaultTracks()
             repository.ensureInitialTracks(defaultTracks)
 
@@ -230,6 +238,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _deletingTrack.value = null
     }
 
+    fun clearDeleteIntentSenderRequest() {
+        _deleteIntentSenderRequest.value = null
+    }
+
     /**
      * Updates song metadata and optionally replaces or removes album artwork.
      * Permanently commits changes to Room database and filesystem.
@@ -278,59 +290,148 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Deletes a song from MiniLyrics Room database and optionally deletes the physical audio file.
+     * Deletes a song permanently from MiniLyrics.
+     *
+     * Option A (deletePhysicalFile = false): "Remove from MiniLyrics"
+     *   - Removes song and its records from Room database.
+     *   - Adds persistent exclusion record so future scans never re-add it.
+     *   - Leaves actual audio file intact in storage.
+     *
+     * Option B (deletePhysicalFile = true): "Permanently Delete from Internal Storage"
+     *   - Physically deletes audio file using Android Storage APIs (with Scoped Storage consent if required).
+     *   - Verifies physical deletion occurred before updating records.
+     *   - Cleans up Room database and associations.
+     *   - Adds persistent exclusion record so it can never reappear.
      */
     fun deleteSong(track: Track, deletePhysicalFile: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // If currently playing, skip or clear
+                // If currently playing, skip to next song
                 withContext(Dispatchers.Main) {
                     if (playbackManager.currentTrack.value?.id == track.id) {
                         playbackManager.nextTrack()
                     }
                 }
 
-                // Delete from Room (cascades playlist songs, lyrics, artworks)
-                repository.deleteSong(track.id)
+                if (!deletePhysicalFile) {
+                    // =========================================================
+                    // OPTION A: REMOVE FROM MINILYRICS ONLY
+                    // =========================================================
+                    // 1. Delete from Room library and register persistent exclusion
+                    repository.deleteSong(
+                        songId = track.id,
+                        audioUri = track.audioUri,
+                        title = track.title,
+                        artist = track.artist,
+                        reason = "USER_REMOVED"
+                    )
 
-                // Remove lyrics files and artwork files
-                lyricsStorageManager.deleteSavedLyricsForTrack(track)
-                artworkStorageManager.deleteArtworkForSong(track.id)
+                    // 2. Clean up local lyrics and artwork associations
+                    lyricsStorageManager.deleteSavedLyricsForTrack(track)
+                    artworkStorageManager.deleteArtworkForSong(track.id)
 
-                // Delete physical file if requested and not demo
-                if (deletePhysicalFile && !track.isDemo && !track.audioUri.isNullOrBlank()) {
-                    try {
-                        val uriStr = track.audioUri
-                        if (uriStr.startsWith("content://")) {
-                            getApplication<Application>().contentResolver.delete(
-                                Uri.parse(uriStr),
-                                null,
-                                null
-                            )
-                        } else {
-                            val f = File(uriStr)
-                            if (f.exists()) f.delete()
+                    withContext(Dispatchers.Main) {
+                        _lastSavedMessage.value = "Removed \"${track.title}\" from MiniLyrics"
+                        dismissDeletingSong()
+                    }
+                } else {
+                    // =========================================================
+                    // OPTION B: PERMANENTLY DELETE FROM INTERNAL STORAGE
+                    // =========================================================
+                    if (track.isDemo) {
+                        // Demo tracks are read-only APK resources
+                        repository.deleteSong(
+                            songId = track.id,
+                            audioUri = track.audioUri,
+                            title = track.title,
+                            artist = track.artist,
+                            reason = "USER_REMOVED"
+                        )
+                        withContext(Dispatchers.Main) {
+                            _lastSavedMessage.value = "Demo track removed from MiniLyrics library"
+                            dismissDeletingSong()
                         }
-                    } catch (e: Exception) {
-                        Log.w(tag, "Could not delete physical audio file: ${e.message}")
+                        return@launch
                     }
-                }
 
-                withContext(Dispatchers.Main) {
-                    _lastSavedMessage.value = if (deletePhysicalFile) {
-                        "Permanently deleted \"${track.title}\""
-                    } else {
-                        "Removed \"${track.title}\" from library"
+                    // Attempt physical deletion with verification
+                    val deletionResult = audioDeletionHelper.deletePhysicalAudio(track.audioUri)
+
+                    when (deletionResult) {
+                        is DeletionResult.Success -> {
+                            // File confirmed deleted from disk
+                            repository.deleteSong(
+                                songId = track.id,
+                                audioUri = track.audioUri,
+                                title = track.title,
+                                artist = track.artist,
+                                reason = "PERMANENTLY_DELETED"
+                            )
+                            lyricsStorageManager.deleteSavedLyricsForTrack(track)
+                            artworkStorageManager.deleteArtworkForSong(track.id)
+
+                            withContext(Dispatchers.Main) {
+                                _lastSavedMessage.value = "Permanently deleted \"${track.title}\" from internal storage"
+                                dismissDeletingSong()
+                            }
+                        }
+                        is DeletionResult.RequiresUserConsent -> {
+                            // Android Scoped Storage requires system consent popup
+                            pendingDeletedTrack = track
+                            withContext(Dispatchers.Main) {
+                                _deleteIntentSenderRequest.value = deletionResult.intentSender
+                                dismissDeletingSong()
+                            }
+                        }
+                        is DeletionResult.Error -> {
+                            // Deletion failed: do NOT falsely report success or remove from library
+                            Log.e(tag, "Physical deletion error: ${deletionResult.message}")
+                            withContext(Dispatchers.Main) {
+                                _onlineError.value = "Deletion failed: ${deletionResult.message}"
+                                dismissDeletingSong()
+                            }
+                        }
                     }
-                    dismissDeletingSong()
                 }
             } catch (e: Exception) {
-                Log.e(tag, "Failed to delete song", e)
+                Log.e(tag, "Failed to process song deletion", e)
                 withContext(Dispatchers.Main) {
                     _onlineError.value = "Failed to delete song: ${e.message}"
+                    dismissDeletingSong()
                 }
             }
         }
+    }
+
+    /**
+     * Called when the user confirms Android system Scoped Storage deletion request.
+     */
+    fun onPermanentDeleteConsentGranted() {
+        val track = pendingDeletedTrack ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.deleteSong(
+                songId = track.id,
+                audioUri = track.audioUri,
+                title = track.title,
+                artist = track.artist,
+                reason = "PERMANENTLY_DELETED"
+            )
+            lyricsStorageManager.deleteSavedLyricsForTrack(track)
+            artworkStorageManager.deleteArtworkForSong(track.id)
+            pendingDeletedTrack = null
+
+            withContext(Dispatchers.Main) {
+                _lastSavedMessage.value = "Permanently deleted \"${track.title}\" from internal storage"
+            }
+        }
+    }
+
+    /**
+     * Called when the user denies Android system Scoped Storage deletion request.
+     */
+    fun onPermanentDeleteConsentDenied() {
+        pendingDeletedTrack = null
+        _onlineError.value = "Permanent deletion cancelled: Storage permission not granted"
     }
 
     // =========================================================================
@@ -502,12 +603,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         navigateTo(MainDestination.NOW_PLAYING_LYRICS)
     }
 
+    /**
+     * Explicitly adds an audio file into the library.
+     * If the song was previously marked as excluded, the explicit user import clears the exclusion.
+     */
     fun addCustomTrack(uri: Uri, title: String, artist: String, durationMs: Long) {
         viewModelScope.launch(Dispatchers.IO) {
+            val songId = "user_${System.currentTimeMillis()}"
+            val cleanTitle = title.ifBlank { "Custom Track" }
+            val cleanArtist = artist.ifBlank { "Unknown Artist" }
+
+            // Clear any prior exclusion for this explicitly imported song
+            repository.removeSongFromExclusion(songId, cleanArtist, cleanTitle)
+
             var newTrack = Track(
-                id = "user_${System.currentTimeMillis()}",
-                title = title.ifBlank { "Custom Track" },
-                artist = artist.ifBlank { "Unknown Artist" },
+                id = songId,
+                title = cleanTitle,
+                artist = cleanArtist,
                 album = "Local Storage",
                 durationMs = durationMs,
                 audioUri = uri.toString(),
@@ -525,9 +637,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Scans device MediaStore audio files.
+     * Strictly verifies newly discovered files against persistent exclusion records.
+     * Songs that were previously removed or permanently deleted by the user will NEVER be re-added.
+     */
     fun scanDeviceAudio() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                // 1. Load all persistent exclusions
+                val excludedList = repository.getAllExcludedSongs()
+                val excludedUris = excludedList.mapNotNull { it.audioUri }.toSet()
+                val excludedKeys = excludedList.map { it.stableKey }.toSet()
+                val excludedIds = excludedList.map { it.id }.toSet()
+
                 val context = getApplication<Application>()
                 val resolver = context.contentResolver
                 val projection = arrayOf(
@@ -566,6 +689,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         )
 
                         val songId = "ms_$id"
+                        val contentUriStr = contentUri.toString()
+                        val stableKey = repository.normalizeKey(artist, title)
+
+                        // 2. Persistent Exclusion Check: Skip if intentionally removed or deleted!
+                        if (excludedIds.contains(songId) ||
+                            excludedUris.contains(contentUriStr) ||
+                            excludedKeys.contains(stableKey)
+                        ) {
+                            continue
+                        }
+
                         scannedEntities.add(
                             SongEntity(
                                 id = songId,
@@ -573,7 +707,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 artist = artist,
                                 album = album,
                                 durationMs = duration,
-                                audioUri = contentUri.toString(),
+                                audioUri = contentUriStr,
                                 isDemo = false
                             )
                         )
@@ -585,6 +719,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } catch (e: Exception) {
                 // MediaStore permission might not be granted yet
+                Log.w(tag, "Audio scan encountered notice: ${e.message}")
             }
         }
     }
